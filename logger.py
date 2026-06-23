@@ -25,6 +25,7 @@ class LogHandler:
         self._setup_tags()
         self._file_lock = threading.Lock()
         self._running = True
+        self._visible = {level: True for level in LOG_LEVELS}
         self._poll()
 
     def _setup_tags(self):
@@ -46,11 +47,23 @@ class LogHandler:
 
     def _write_to_widget(self, msg):
         timestamp, level, text = msg
+        if not self._visible.get(level, True):
+            return
         tag = LOG_LEVELS.get(level, LOG_LEVELS['INFO'])['tag']
         line = f'[{timestamp}] [{level}] {text}\n'
         self.text_widget.insert(END, line)
         self.text_widget.tag_add(tag, f'end-2l', f'end-1c')
         self.text_widget.see(END)
+
+    def set_level_visible(self, level, visible):
+        self._visible[level] = visible
+
+    def is_level_visible(self, level):
+        return self._visible.get(level, True)
+
+    def toggle_level(self, level):
+        self._visible[level] = not self._visible.get(level, True)
+        return self._visible[level]
 
     def log(self, text, level='INFO'):
         timestamp = datetime.now().strftime('%H:%M:%S')

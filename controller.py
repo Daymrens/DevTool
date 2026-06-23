@@ -1,10 +1,16 @@
 import os
 import re
 import subprocess
+import sys
 import threading
 import webbrowser
 
 _ANSI_RE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+
+if sys.platform == 'win32':
+    _CREATE_NO_WINDOW = subprocess.CREATE_NO_WINDOW
+else:
+    _CREATE_NO_WINDOW = 0
 
 
 def _strip_ansi(text):
@@ -31,6 +37,15 @@ class ProcessController:
         self.after = gui_after
         self._procs = {}
         self._lock = threading.Lock()
+        self._term_cbs = {}
+
+    def set_terminal_callback(self, tab, callback):
+        self._term_cbs[tab] = callback
+
+    def _term_write(self, tab, text):
+        cb = self._term_cbs.get(tab)
+        if cb:
+            cb(text)
 
     def _set_proc(self, key, proc):
         with self._lock:
@@ -115,24 +130,36 @@ class ProcessController:
 
     def start_emulators(self, on_start=None, on_done=None):
         def _run():
-            script = os.path.join(self.config.project_root, 'emulators_start.ps1')
-            if os.path.isfile(script):
-                self.log('Starting via emulators_start.ps1', 'INFO')
-                proc = self._popen_cmd(
-                    ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-NoLogo',
-                     '-File', script],
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, cwd=self.config.project_root,
-                    creationflags=subprocess.CREATE_NO_WINDOW, bufsize=1,
-                )
+            proc = None
+            if sys.platform == 'win32':
+                script = os.path.join(self.config.project_root, 'emulators_start.ps1')
+                if os.path.isfile(script):
+                    self.log('Starting via emulators_start.ps1', 'INFO')
+                    proc = self._popen_cmd(
+                        ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-NoLogo',
+                         '-File', script],
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, cwd=self.config.project_root,
+                        creationflags=_CREATE_NO_WINDOW, bufsize=1,
+                    )
             else:
+                sh_script = os.path.join(self.config.project_root, 'emulators_start.sh')
+                if os.path.isfile(sh_script):
+                    self.log('Starting via emulators_start.sh', 'INFO')
+                    proc = self._popen_cmd(
+                        ['sh', sh_script],
+                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, cwd=self.config.project_root,
+                        creationflags=_CREATE_NO_WINDOW, bufsize=1,
+                    )
+            if proc is None:
                 env = self._env_with_java()
                 proc = self._popen_shell(
                     'firebase emulators:start --only auth,firestore,storage',
                     env=env,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, cwd=self.config.project_root,
-                    creationflags=subprocess.CREATE_NO_WINDOW, bufsize=1,
+                    creationflags=_CREATE_NO_WINDOW, bufsize=1,
                 )
 
             if proc is None:
@@ -141,7 +168,18 @@ class ProcessController:
             self._set_proc('emulators', proc)
             if on_start:
                 self.after(0, on_start)
-            _stream_output(proc, self.log, 'EMULATOR')
+            self._term_write('firebase', '> Starting Firebase Emulators...\n')
+            try:
+                for line in iter(proc.stdout.readline, ''):
+                    if line:
+                        clean = _strip_ansi(line.rstrip())
+                        if clean:
+                            self.log(clean, 'EMULATOR')
+                            self._term_write('firebase', clean + '\n')
+                    else:
+                        break
+            except Exception:
+                pass
             proc.wait()
             self._on_done('emulators', on_done)
 
@@ -151,15 +189,26 @@ class ProcessController:
         def _run():
             self._kill_proc_tree('emulators')
 
-            script = os.path.join(self.config.project_root, 'emulators_stop.ps1')
-            if os.path.isfile(script):
-                subprocess.run(
-                    ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-NoLogo',
-                     '-File', script],
-                    capture_output=True, timeout=10,
-                    creationflags=subprocess.CREATE_NO_WINDOW,
-                )
+            stopped_script = False
+            if sys.platform == 'win32':
+                script = os.path.join(self.config.project_root, 'emulators_stop.ps1')
+                if os.path.isfile(script):
+                    subprocess.run(
+                        ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-NoLogo',
+                         '-File', script],
+                        capture_output=True, timeout=10,
+                        creationflags=_CREATE_NO_WINDOW,
+                    )
+                    stopped_script = True
             else:
+                sh_script = os.path.join(self.config.project_root, 'emulators_stop.sh')
+                if os.path.isfile(sh_script):
+                    subprocess.run(
+                        ['sh', sh_script],
+                        capture_output=True, timeout=10,
+                    )
+                    stopped_script = True
+            if not stopped_script:
                 try:
                     import psutil
                     terms = ['firestore', 'firebase', 'emulator', 'cloud-firestore']
@@ -194,7 +243,7 @@ class ProcessController:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, cwd=self.config.project_root,
-                creationflags=subprocess.CREATE_NO_WINDOW, bufsize=1,
+                creationflags=_CREATE_NO_WINDOW, bufsize=1,
             )
             if proc is None:
                 return
@@ -202,7 +251,18 @@ class ProcessController:
             self._set_proc('flutter', proc)
             if on_start:
                 self.after(0, on_start)
-            _stream_output(proc, self.log, 'FLUTTER')
+            self._term_write('flutter', f'> {cmd}\n')
+            try:
+                for line in iter(proc.stdout.readline, ''):
+                    if line:
+                        clean = _strip_ansi(line.rstrip())
+                        if clean:
+                            self.log(clean, 'FLUTTER')
+                            self._term_write('flutter', clean + '\n')
+                    else:
+                        break
+            except Exception:
+                pass
             proc.wait()
             self._on_done('flutter', on_done)
 
@@ -234,7 +294,51 @@ class ProcessController:
         self._one_shot('dart run build_runner build --delete-conflicting-outputs', 'BUILD', on_done, key='build_runner')
 
     def flutter_build_apk(self, on_done=None):
-        self._one_shot('flutter build apk', 'BUILD', on_done, key='build_apk')
+        self._apk_path = None
+        def _run():
+            proc = self._popen_shell(
+                'flutter build apk',
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, cwd=self.config.project_root,
+                creationflags=_CREATE_NO_WINDOW, bufsize=1,
+            )
+            if proc is None:
+                if on_done:
+                    self.after(0, on_done)
+                return
+            self._set_proc('build_apk', proc)
+            apk_re = re.compile(r'Built\s+(.+\.apk)\s*(?:\(([\d.]+\s*\w+)\))?')
+            try:
+                for line in iter(proc.stdout.readline, ''):
+                    if line:
+                        clean = _strip_ansi(line.rstrip())
+                        if clean:
+                            self.log(clean, 'BUILD')
+                            m = apk_re.search(clean)
+                            if m:
+                                p = m.group(1)
+                                size = m.group(2)
+                                absp = os.path.normpath(os.path.join(self.config.project_root, p))
+                                self._apk_path = absp
+                                if os.path.isfile(absp):
+                                    sz = f' ({size})' if size else f' ({os.path.getsize(absp) / 1e6:.1f} MB)'
+                                    self.log(f'APK: {absp}{sz}', 'SUCCESS')
+                    else:
+                        break
+            except Exception:
+                pass
+            proc.wait()
+            self._pop_proc('build_apk')
+            if proc.returncode == 0 and self._apk_path and os.path.isfile(self._apk_path):
+                self.log('flutter build apk completed.', 'SUCCESS')
+            elif proc.returncode != 0:
+                self.log(f'flutter build apk failed (code {proc.returncode}).', 'ERROR')
+            if on_done:
+                self.after(0, on_done)
+        threading.Thread(target=_run, daemon=True).start()
+
+    def get_apk_path(self):
+        return getattr(self, '_apk_path', None)
 
     def flutter_analyze(self, on_done=None):
         self._one_shot('flutter analyze', 'BUILD', on_done, key='analyze')
@@ -259,20 +363,34 @@ class ProcessController:
     def pub_upgrade(self, on_done=None):
         self._one_shot('flutter pub upgrade', 'BUILD', on_done, key='pub_upgrade')
 
+    def pub_outdated(self, on_done=None):
+        self._one_shot('flutter pub outdated', 'BUILD', on_done, key='pub_outdated')
+
     def flutter_logs(self, on_start=None, on_done=None):
         def _run():
             proc = self._popen_shell(
                 'flutter logs',
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, cwd=self.config.project_root,
-                creationflags=subprocess.CREATE_NO_WINDOW, bufsize=1,
+                creationflags=_CREATE_NO_WINDOW, bufsize=1,
             )
             if proc is None:
                 return
             self._set_proc('flutter_logs', proc)
             if on_start:
                 self.after(0, on_start)
-            _stream_output(proc, self.log, 'FLUTTER')
+            self._term_write('flutter', '> flutter logs\n')
+            try:
+                for line in iter(proc.stdout.readline, ''):
+                    if line:
+                        clean = _strip_ansi(line.rstrip())
+                        if clean:
+                            self.log(clean, 'FLUTTER')
+                            self._term_write('flutter', clean + '\n')
+                    else:
+                        break
+            except Exception:
+                pass
             proc.wait()
             self._on_done('flutter_logs', on_done)
         threading.Thread(target=_run, daemon=True).start()
@@ -298,7 +416,7 @@ class ProcessController:
                 cmd,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, cwd=self.config.project_root,
-                creationflags=subprocess.CREATE_NO_WINDOW, bufsize=1,
+                creationflags=_CREATE_NO_WINDOW, bufsize=1,
             )
             if proc is None:
                 return
@@ -326,7 +444,7 @@ class ProcessController:
             result = subprocess.run(
                 [exe, '-list-avds'],
                 capture_output=True, text=True, timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=_CREATE_NO_WINDOW,
             )
             return [l.strip() for l in result.stdout.splitlines() if l.strip()]
         except Exception:
@@ -342,7 +460,7 @@ class ProcessController:
                 [exe, '-avd', avd_name],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW, bufsize=1,
+                creationflags=_CREATE_NO_WINDOW, bufsize=1,
             )
             if proc is None:
                 return
@@ -365,7 +483,7 @@ class ProcessController:
                     subprocess.run(
                         [adb, 'emu', 'kill'],
                         capture_output=True, timeout=5,
-                        creationflags=subprocess.CREATE_NO_WINDOW,
+                        creationflags=_CREATE_NO_WINDOW,
                     )
                 except Exception:
                     pass
@@ -373,6 +491,34 @@ class ProcessController:
             if on_done:
                 self.after(0, on_done)
 
+        threading.Thread(target=_run, daemon=True).start()
+
+    def wipe_avd(self, avd_name, on_start=None, on_done=None):
+        def _run():
+            self._kill_proc_tree('avd')
+            exe = self.config.emulator_exe
+            if not exe:
+                self.log('Android emulator executable not found.', 'ERROR')
+                if on_done:
+                    self.after(0, on_done)
+                return
+            self.log(f'Wiping data and cold-booting AVD: {avd_name}', 'INFO')
+            proc = self._popen_cmd(
+                [exe, '-avd', avd_name, '-wipe-data', '-no-snapshot-load'],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True,
+                creationflags=_CREATE_NO_WINDOW, bufsize=1,
+            )
+            if proc is None:
+                if on_done:
+                    self.after(0, on_done)
+                return
+            self._set_proc('avd', proc)
+            if on_start:
+                self.after(0, on_start)
+            _stream_output(proc, self.log, 'ANDROID')
+            proc.wait()
+            self._on_done('avd', on_done)
         threading.Thread(target=_run, daemon=True).start()
 
     def adb_install(self, apk_path, on_done=None):
@@ -392,7 +538,7 @@ class ProcessController:
             proc = self._popen_cmd(
                 [adb, 'install', '-r', apk_path],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, creationflags=subprocess.CREATE_NO_WINDOW, bufsize=1,
+                text=True, creationflags=_CREATE_NO_WINDOW, bufsize=1,
             )
             if proc is None:
                 if on_done:
@@ -413,13 +559,21 @@ class ProcessController:
     def firebase_login(self):
         def _run():
             self.log('Opening Firebase login in browser...', 'INFO')
-            proc = self._popen_cmd(
-                ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-NoLogo',
-                 '-Command', 'firebase login'],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, cwd=self.config.project_root,
-                creationflags=subprocess.CREATE_NO_WINDOW, bufsize=1,
-            )
+            if sys.platform == 'win32':
+                proc = self._popen_cmd(
+                    ['powershell.exe', '-ExecutionPolicy', 'Bypass', '-NoLogo',
+                     '-Command', 'firebase login'],
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, cwd=self.config.project_root,
+                    creationflags=_CREATE_NO_WINDOW, bufsize=1,
+                )
+            else:
+                proc = self._popen_shell(
+                    'firebase login',
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, cwd=self.config.project_root,
+                    creationflags=_CREATE_NO_WINDOW, bufsize=1,
+                )
             if proc is None:
                 return
             _stream_output(proc, self.log, 'INFO')
@@ -437,7 +591,7 @@ class ProcessController:
                 'firebase logout',
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, cwd=self.config.project_root,
-                creationflags=subprocess.CREATE_NO_WINDOW, bufsize=1,
+                creationflags=_CREATE_NO_WINDOW, bufsize=1,
             )
             if proc is None:
                 return
@@ -467,7 +621,7 @@ class ProcessController:
                 cmd,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, cwd=self.config.project_root,
-                creationflags=subprocess.CREATE_NO_WINDOW, bufsize=1,
+                creationflags=_CREATE_NO_WINDOW, bufsize=1,
             )
             if proc is None:
                 if on_done:
@@ -492,7 +646,7 @@ class ProcessController:
                 ['git', '-C', self.config.project_root,
                  'rev-parse', '--abbrev-ref', 'HEAD'],
                 capture_output=True, text=True, timeout=5,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=_CREATE_NO_WINDOW,
             )
             return result.stdout.strip() if result.returncode == 0 else ''
         except Exception:
@@ -507,7 +661,7 @@ class ProcessController:
                 f'git commit -m "{message}"',
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, cwd=self.config.project_root,
-                creationflags=subprocess.CREATE_NO_WINDOW, bufsize=1,
+                creationflags=_CREATE_NO_WINDOW, bufsize=1,
             )
             if proc is None:
                 if on_done:
@@ -538,6 +692,18 @@ class ProcessController:
     def git_stash_pop(self, on_done=None):
         self._one_shot('git stash pop', 'BUILD', on_done, key='git_stash_pop')
 
+    def git_diff_stat(self, on_done=None):
+        self._one_shot('git diff --stat', 'BUILD', on_done, key='git_diff_stat')
+
+    def git_diff_cached_stat(self, on_done=None):
+        self._one_shot('git diff --cached --stat', 'BUILD', on_done, key='git_diff_cached')
+
+    def git_diff(self, on_done=None):
+        self._one_shot('git diff', 'BUILD', on_done, key='git_diff')
+
+    def git_status_short(self, on_done=None):
+        self._one_shot('git status --short', 'BUILD', on_done, key='git_status_short')
+
     def git_branch(self, on_done=None):
         self._one_shot('git branch -a', 'BUILD', on_done, key='git_branch')
 
@@ -555,7 +721,7 @@ class ProcessController:
                 f'firebase emulators:export "{path}"',
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, cwd=self.config.project_root,
-                creationflags=subprocess.CREATE_NO_WINDOW, bufsize=1,
+                creationflags=_CREATE_NO_WINDOW, bufsize=1,
             )
             if proc is None:
                 if on_done:
@@ -577,7 +743,7 @@ class ProcessController:
                 f'firebase emulators:start --import "{path}"',
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, cwd=self.config.project_root,
-                creationflags=subprocess.CREATE_NO_WINDOW, bufsize=1,
+                creationflags=_CREATE_NO_WINDOW, bufsize=1,
             )
             if proc is None:
                 if on_done:
@@ -595,7 +761,7 @@ class ProcessController:
                 f'firebase messaging:send --token "{token}" --title "{title}" --body "{body}"',
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, cwd=self.config.project_root,
-                creationflags=subprocess.CREATE_NO_WINDOW, bufsize=1,
+                creationflags=_CREATE_NO_WINDOW, bufsize=1,
             )
             if proc is None:
                 if on_done:
@@ -611,13 +777,85 @@ class ProcessController:
                 self.after(0, on_done)
         threading.Thread(target=_run, daemon=True).start()
 
+    def _snapshots_dir(self):
+        return os.path.join(self.config.project_root, 'emulator_snapshots')
+
+    def snapshot_list(self):
+        d = self._snapshots_dir()
+        if not os.path.isdir(d):
+            return []
+        return sorted([
+            name for name in os.listdir(d)
+            if os.path.isdir(os.path.join(d, name))
+        ])
+
+    def snapshot_save(self, name, on_done=None):
+        def _run():
+            snap_dir = os.path.join(self._snapshots_dir(), name)
+            os.makedirs(snap_dir, exist_ok=True)
+            proc = self._popen_shell(
+                f'firebase emulators:export "{snap_dir}"',
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, cwd=self.config.project_root,
+                creationflags=_CREATE_NO_WINDOW, bufsize=1,
+            )
+            if proc is None:
+                if on_done:
+                    self.after(0, on_done)
+                return
+            _stream_output(proc, self.log, 'BUILD')
+            proc.wait()
+            if proc.returncode == 0:
+                self.log(f'Snapshot saved: {name}', 'SUCCESS')
+            else:
+                self.log(f'Snapshot save failed (code {proc.returncode}).', 'ERROR')
+            if on_done:
+                self.after(0, on_done)
+        threading.Thread(target=_run, daemon=True).start()
+
+    def snapshot_load(self, name, on_done=None):
+        def _run():
+            snap_dir = os.path.join(self._snapshots_dir(), name)
+            if not os.path.isdir(snap_dir):
+                self.log(f'Snapshot not found: {name}', 'ERROR')
+                if on_done:
+                    self.after(0, on_done)
+                return
+            self._kill_proc_tree('emulators')
+            proc = self._popen_shell(
+                f'firebase emulators:start --import "{snap_dir}"',
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, cwd=self.config.project_root,
+                creationflags=_CREATE_NO_WINDOW, bufsize=1,
+            )
+            if proc is None:
+                if on_done:
+                    self.after(0, on_done)
+                return
+            self._set_proc('emulators', proc)
+            _stream_output(proc, self.log, 'EMULATOR')
+            proc.wait()
+            self._on_done('emulators', on_done)
+        threading.Thread(target=_run, daemon=True).start()
+
+    def snapshot_delete(self, name, on_done=None):
+        def _run():
+            snap_dir = os.path.join(self._snapshots_dir(), name)
+            if os.path.isdir(snap_dir):
+                import shutil
+                shutil.rmtree(snap_dir, ignore_errors=True)
+                self.log(f'Snapshot deleted: {name}', 'SUCCESS')
+            if on_done:
+                self.after(0, on_done)
+        threading.Thread(target=_run, daemon=True).start()
+
     def switch_firebase_project(self, alias, on_done=None):
         def _run():
             proc = self._popen_shell(
                 f'firebase use {alias}',
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, cwd=self.config.project_root,
-                creationflags=subprocess.CREATE_NO_WINDOW, bufsize=1,
+                creationflags=_CREATE_NO_WINDOW, bufsize=1,
             )
             if proc is None:
                 if on_done:
@@ -657,7 +895,7 @@ class ProcessController:
             result = subprocess.run(
                 ['flutter', '--version'],
                 capture_output=True, text=True, timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=_CREATE_NO_WINDOW,
             )
             if result.returncode == 0:
                 for line in result.stdout.splitlines():
@@ -687,5 +925,16 @@ class ProcessController:
             self.log('Opened Firebase Console in browser.', 'INFO')
 
     def open_project_folder(self):
-        os.startfile(self.config.project_root)
-        self.log(f'Opened project folder: {self.config.project_root}', 'INFO')
+        path = self.config.project_root
+        try:
+            if sys.platform == 'win32':
+                os.startfile(path)
+            elif sys.platform == 'darwin':
+                subprocess.run(['open', path], check=False,
+                               creationflags=_CREATE_NO_WINDOW)
+            else:
+                subprocess.run(['xdg-open', path], check=False,
+                               creationflags=_CREATE_NO_WINDOW)
+        except Exception as e:
+            self.log(f'Failed to open folder: {e}', 'ERROR')
+        self.log(f'Opened project folder: {path}', 'INFO')

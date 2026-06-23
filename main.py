@@ -202,6 +202,63 @@ class SetupDialog(ctk.CTkToplevel):
         self.destroy()
 
 
+class EnvEditorDialog(ctk.CTkToplevel):
+    def __init__(self, parent, project_root, filename='.env'):
+        super().__init__(parent)
+        self.project_root = project_root
+        self.filename = filename
+        self.title(f'Edit {filename}')
+        self.geometry('500x360')
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self.configure(fg_color=C['card'])
+
+        ctk.CTkLabel(self, text=f'Editing: {filename}',
+                      font=('Segoe UI', 14, 'bold'),
+                      text_color=C['accent']).pack(padx=12, pady=(10, 2), anchor='w')
+
+        self.textbox = Text(
+            self, bg='#1b1b1f', fg='#e8e0d8', insertbackground='#e8e0d8',
+            font=('Consolas', 11), relief='flat', borderwidth=0,
+            padx=8, pady=6, wrap='none',
+        )
+        self.textbox.pack(fill='both', expand=True, padx=10, pady=4)
+        self._load_content()
+
+        btn_frame = ctk.CTkFrame(self, fg_color='transparent')
+        btn_frame.pack(fill='x', padx=12, pady=(4, 10))
+        ClaudeButton(btn_frame, text='Cancel', width=80,
+                      command=self.destroy).pack(side='right', padx=(6, 0))
+        ClaudeButton(btn_frame, text='Save', width=80, style='primary',
+                      command=self._save).pack(side='right')
+
+    def _env_path(self):
+        return os.path.join(self.project_root, self.filename)
+
+    def _load_content(self):
+        path = self._env_path()
+        if os.path.isfile(path):
+            try:
+                with open(path, 'r', encoding='utf-8') as f:
+                    self.textbox.insert('1.0', f.read())
+            except Exception as e:
+                self.textbox.insert('1.0', f'# Error reading file: {e}')
+        else:
+            self.textbox.insert('1.0', f'# {self.filename} not found — create one')
+
+    def _save(self):
+        content = self.textbox.get('1.0', 'end-1c')
+        path = self._env_path()
+        try:
+            with open(path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            messagebox.showinfo('Saved', f'{self.filename} saved.', parent=self)
+            self.destroy()
+        except Exception as e:
+            messagebox.showerror('Error', f'Failed to save: {e}', parent=self)
+
+
 class TerminalWidget(ctk.CTkFrame):
     _ANSI_RE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
@@ -359,10 +416,54 @@ class TerminalWidget(ctk.CTkFrame):
                 self._proc = None
             self._on_cmd_done()
 
+    def append_output(self, text, tag='output'):
+        self._write(text, tag)
+
     def _clear(self):
         self._output.configure(state='normal')
         self._output.delete('1.0', 'end')
         self._output.configure(state='disabled')
+
+
+class TabbedTerminal(ctk.CTkFrame):
+    def __init__(self, parent, project_root, controller):
+        super().__init__(parent, fg_color='transparent')
+        self.controller = controller
+        self.project_root = project_root
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        self.tabview = ctk.CTkTabview(self, fg_color=C['card'], text_color=C['text'],
+                                       segmented_button_fg_color=C['bg'],
+                                       segmented_button_selected_color=C['accent'],
+                                       segmented_button_selected_hover_color=C['accent_h'],
+                                       segmented_button_unselected_color=C['gray'],
+                                       corner_radius=6)
+        self.tabview.grid(row=0, column=0, sticky='nsew')
+
+        self.tabs = {}
+        for name in ('General', 'Flutter', 'Firebase'):
+            tab = self.tabview.add(name)
+            term = TerminalWidget(tab, project_root)
+            term.pack(fill='both', expand=True)
+            self.tabs[name] = term
+
+        self.controller.set_terminal_callback('general',
+            lambda t: self.tabs['General'].append_output(t))
+        self.controller.set_terminal_callback('flutter',
+            lambda t: self.tabs['Flutter'].append_output(t, 'prompt'))
+        self.controller.set_terminal_callback('firebase',
+            lambda t: self.tabs['Firebase'].append_output(t, 'prompt'))
+
+    def set_project_root(self, path):
+        self.project_root = path
+        for name, term in self.tabs.items():
+            term.project_root = path
+            term._prompt_prefix = f'{path}>'
+
+    def abort_all(self):
+        for name, term in self.tabs.items():
+            term._abort_cmd()
 
 
 class CommandPalette(ctk.CTkToplevel):
@@ -613,6 +714,7 @@ class FlutterModal(ModalBase):
         self._btn(card, '\uD83D\uDCE6  Build APK', 95, app._build_apk, r, 2, 'primary')
         self._btn(card, '\uD83D\uDD0D  Analyze', 80, app._analyze, r, 3)
         self._btn(card, '\uD83D\uDDD1  Clean', 65, app._clean, r, 4, 'warning')
+        self._btn(card, '\uD83D\uDCC2  Open Build', 100, app._open_build_folder, r, 5)
 
         r += 1; self._sep(card, r, 11)
         r += 1
@@ -631,11 +733,12 @@ class FlutterModal(ModalBase):
                                            app._flutter_logs, r, 5)
         app._btn_stop_logs = self._btn(card, '\u23F9  Stop Logs', 85,
                                         app._stop_flutter_logs, r, 6, 'danger', state='disabled')
+        self._btn(card, '\uD83D\uDDC4  Pub Outdated', 110, app._pub_outdated, r, 7)
 
 
 class AndroidModal(ModalBase):
     def __init__(self, parent, app):
-        super().__init__(parent, app, 'Android Emulator', 480, 180)
+        super().__init__(parent, app, 'Android Emulator', 580, 200)
         card = self.body
         card.grid_columnconfigure(3, weight=1)
 
@@ -653,6 +756,7 @@ class AndroidModal(ModalBase):
                                         app._launch_avd, r, 4, 'primary')
         app.btn_avd_kill = self._btn(card, '\u25A0  Kill', 65,
                                       app._kill_avd, r, 5, 'danger', state='disabled')
+        self._btn(card, '\uD83D\uDDD1  Wipe & Cold Boot', 140, app._wipe_avd, r, 6, 'warning')
 
         r += 1; self._sep(card, r, 6)
         r += 1
@@ -691,6 +795,8 @@ class GitModal(ModalBase):
         self._btn(card, '\u2139  Status', 75, app._git_status, r, 2)
         self._btn(card, '\uD83D\uDCCB  Log', 65, app._git_log, r, 3)
         self._btn(card, '\uD83C\uDFF7  Branch', 80, app._git_branch, r, 4)
+        self._btn(card, '\uD83D\uDD0D  Diff', 65, app._show_git_diff, r, 5)
+        self._btn(card, '\uD83D\uDD0D  Diff Staged', 100, app._show_git_diff_cached, r, 6)
 
         r += 1; self._sep(card, r, 9)
         r += 1
@@ -702,7 +808,7 @@ class GitModal(ModalBase):
 
 class ToolsModal(ModalBase):
     def __init__(self, parent, app):
-        super().__init__(parent, app, 'Tools', 520, 300)
+        super().__init__(parent, app, 'Tools', 580, 400)
         card = self.body
         card.grid_columnconfigure(6, weight=1)
 
@@ -718,6 +824,26 @@ class ToolsModal(ModalBase):
                   app.controller.open_project_folder, r, 4)
         self._btn(card, '\u2699  Settings', 80, app._open_settings, r, 5)
         self._btn(card, '\uD83D\uDD04  Switch Project', 125, app._switch_project, r, 6)
+        self._btn(card, '\u2716  Quit', 65, app._quit_app, r, 7, 'danger')
+
+        r += 1; self._sep(card, r, 8)
+        r += 1
+        self._lbl(card, 'Profiles', r, 0, font=('Segoe UI', 11), text_color=C['muted'])
+        app.profile_name_var = ctk.StringVar()
+        ctk.CTkEntry(
+            card, textvariable=app.profile_name_var, width=120,
+            placeholder_text='profile name...', font=('Segoe UI', 11),
+        ).grid(row=r, column=2, padx=2, pady=2)
+        self._btn(card, '\uD83D\uDCBE  Save', 65, app._save_profile, r, 3, 'primary')
+        self._btn(card, '\uD83D\uDCC2  Load', 65, app._load_profile, r, 4)
+        self._btn(card, '\uD83D\uDDD1  Delete', 75, app._delete_profile, r, 5, 'danger')
+        app.profile_combo = ctk.CTkComboBox(
+            card, values=app.config.list_profiles() or ['default'],
+            width=180, state='readonly',
+            font=('Segoe UI', 11),
+        )
+        app.profile_combo.set(app.config.current_profile)
+        app.profile_combo.grid(row=r, column=6, padx=2, pady=2)
 
         r += 1; self._sep(card, r, 8)
         r += 1
@@ -729,6 +855,7 @@ class ToolsModal(ModalBase):
         )
         app.env_combo.set('default')
         app.env_combo.grid(row=r, column=2, padx=2, pady=(2, 8))
+        self._btn(card, '\u270F  Edit .env', 90, app._edit_env_file, r, 3)
 
         r += 1; self._sep(card, r, 8)
         r += 1
@@ -737,6 +864,25 @@ class ToolsModal(ModalBase):
                   app._test_notification, r, 2)
         self._btn(card, '\uD83D\uDCE4  Export Data', 110, app._export_data, r, 3)
         self._btn(card, '\uD83D\uDCE5  Import Data', 110, app._import_data, r, 4)
+
+        r += 1; self._sep(card, r, 8)
+        r += 1
+        self._lbl(card, 'Snapshots', r, 0, font=('Segoe UI', 11), text_color=C['muted'])
+        app.snapshot_name_var = ctk.StringVar()
+        ctk.CTkEntry(
+            card, textvariable=app.snapshot_name_var, width=120,
+            placeholder_text='snapshot name...', font=('Segoe UI', 11),
+        ).grid(row=r, column=2, padx=2, pady=2)
+        self._btn(card, '\uD83D\uDCBE  Save', 65, app._snapshot_save, r, 3, 'primary')
+        self._btn(card, '\uD83D\uDCC2  Load', 65, app._snapshot_load, r, 4)
+        self._btn(card, '\uD83D\uDDD1  Delete', 75, app._snapshot_delete, r, 5, 'danger')
+        app.snapshot_combo = ctk.CTkComboBox(
+            card, values=app.controller.snapshot_list() or ['(no snapshots)'],
+            width=180, state='readonly',
+            font=('Segoe UI', 11),
+        )
+        app.snapshot_combo.grid(row=r, column=6, padx=2, pady=2)
+        self._refresh_snapshot_list = lambda: app._refresh_snapshot_list()
 
         r += 1; self._sep(card, r, 8)
         r += 1
@@ -784,22 +930,29 @@ class PetTrackerDevTool(ctk.CTk):
         self._setup_grid()
         self._build_header()
         self._build_launcher()
-        self._build_terminal()
         self._build_log_panel()
 
         self.logger = LogHandler(self.log_textbox)
         self.controller = ProcessController(self.config, self.log, self.after)
+
+        self._build_terminal()
 
         self.monitor = ServiceMonitor(self._on_status_change, self.config)
         self.monitor.start()
         self._build_status_bar()
         self._build_command_map()
         self.bind_all('<Control-p>', lambda e: self._open_palette())
+        self.bind_all('<Control-r>', lambda e: self._hot_reload())
+        self.bind_all('<Control-b>', lambda e: self._build_apk())
+        self.bind_all('<Control-g>', lambda e: self._open_git())
+        self.bind_all('<Control-Shift-E>', lambda e: self._start_emulators())
+        self.bind_all('<Control-Shift-X>', lambda e: self._stop_emulators())
 
         self.log('Dev Toolkit ready.', 'SUCCESS')
         self.log(f'Project: {self.config.project_root}', 'INFO')
         self._update_git_branch()
         self._update_flutter_version()
+        self.after(150, self._restore_session)
 
     # ── Layout ─────────────────────────────────────────────
 
@@ -892,7 +1045,7 @@ class PetTrackerDevTool(ctk.CTk):
 
     def _build_terminal(self):
         root = self.config.project_root if self.config and self.config.project_root else os.getcwd()
-        self.terminal = TerminalWidget(self, root)
+        self.terminal = TabbedTerminal(self, root, self.controller)
         self.terminal.grid(row=1, column=1, sticky='nsew', padx=(4, 4), pady=(4, 0))
 
     def _open_modal(self, cls, btn_key=None):
@@ -957,6 +1110,8 @@ class PetTrackerDevTool(ctk.CTk):
             'Flutter \u2014 Pub Get': self._pub_get,
             'Flutter \u2014 Build Runner': self._build_runner,
             'Flutter \u2014 Build APK': self._build_apk,
+            'Flutter \u2014 Open Build Folder': self._open_build_folder,
+            'Flutter \u2014 Pub Outdated': self._pub_outdated,
             'Flutter \u2014 Analyze': self._analyze,
             'Flutter \u2014 Clean': self._clean,
             'Flutter \u2014 Test': self._test,
@@ -970,6 +1125,7 @@ class PetTrackerDevTool(ctk.CTk):
             'Android \u2014 Open Modal': self._open_android,
             'Android \u2014 Launch AVD': self._launch_avd,
             'Android \u2014 Kill AVD': self._kill_avd,
+            'Android \u2014 Wipe & Cold Boot': self._wipe_avd,
             'Android \u2014 Install APK': self._adb_install,
             'Android \u2014 Emulator UI': lambda: self.controller.open_emulator_ui(),
             'Android \u2014 Firestore Console': lambda: self.controller.open_firestore_console(),
@@ -977,6 +1133,8 @@ class PetTrackerDevTool(ctk.CTk):
             'Git \u2014 Add & Commit': self._git_commit,
             'Git \u2014 Pull': self._git_pull,
             'Git \u2014 Push': self._git_push,
+            'Git \u2014 Diff': self._show_git_diff,
+            'Git \u2014 Diff Staged': self._show_git_diff_cached,
             'Git \u2014 Status': self._git_status,
             'Git \u2014 Log': self._git_log,
             'Git \u2014 Branch': self._git_branch,
@@ -984,11 +1142,19 @@ class PetTrackerDevTool(ctk.CTk):
             'Git \u2014 Stash': self._git_stash,
             'Git \u2014 Stash Pop': self._git_stash_pop,
             'Tools \u2014 Open Modal': self._open_tools,
+            'Tools \u2014 Save Profile': self._save_profile,
+            'Tools \u2014 Load Profile': self._load_profile,
+            'Tools \u2014 Delete Profile': self._delete_profile,
+            'Tools \u2014 Quit': self._quit_app,
             'Tools \u2014 Settings': self._open_settings,
+            'Tools \u2014 Edit .env': self._edit_env_file,
             'Tools \u2014 Switch Project': self._switch_project,
             'Tools \u2014 Test Notification': self._test_notification,
             'Tools \u2014 Export Data': self._export_data,
             'Tools \u2014 Import Data': self._import_data,
+            'Tools \u2014 Snapshot Save': self._snapshot_save,
+            'Tools \u2014 Snapshot Load': self._snapshot_load,
+            'Tools \u2014 Snapshot Delete': self._snapshot_delete,
             'Tools \u2014 npm Install': self._npm_install,
             'Tools \u2014 npm Test': self._npm_test,
             'Tools \u2014 npm Audit': self._npm_audit,
@@ -1126,6 +1292,25 @@ class PetTrackerDevTool(ctk.CTk):
         self._log('Building APK...', 'INFO')
         self.controller.flutter_build_apk()
 
+    def _open_build_folder(self):
+        build_dir = os.path.join(self.config.project_root, 'build', 'app', 'outputs', 'flutter-apk')
+        if os.path.isdir(build_dir):
+            self._log(f'Opening build folder: {build_dir}', 'INFO')
+            import webbrowser
+            webbrowser.open(build_dir)
+        else:
+            apk_path = self.controller.get_apk_path()
+            if apk_path and os.path.isfile(apk_path):
+                d = os.path.dirname(apk_path)
+                self._log(f'Opening build folder: {d}', 'INFO')
+                webbrowser.open(d)
+            else:
+                self._log('No build output found yet. Run Build APK first.', 'WARNING')
+
+    def _pub_outdated(self):
+        self._log('Running flutter pub outdated...', 'INFO')
+        self.controller.pub_outdated()
+
     def _analyze(self):
         self._log('Running flutter analyze...', 'INFO')
         self.controller.flutter_analyze()
@@ -1247,6 +1432,33 @@ class PetTrackerDevTool(ctk.CTk):
 
         self.controller.launch_avd(name, on_start=on_start, on_done=on_done)
 
+    def _wipe_avd(self):
+        name = self.avd_combo.get() if hasattr(self, 'avd_combo') else ''
+        if not name or name == '(no AVDs found)':
+            self._log('No AVD selected.', 'WARNING')
+            return
+        if not messagebox.askyesno('Wipe & Cold Boot',
+                                    f'Wipe data and cold-boot "{name}"?'):
+            return
+        if hasattr(self, 'btn_avd_launch') and self.btn_avd_launch:
+            self.btn_avd_launch.configure(state='disabled', text='\u25B6  Wiping...')
+            self.btn_avd_kill.configure(state='disabled')
+        self._log(f'Wiping data and cold-booting AVD: {name}', 'INFO')
+
+        def on_start():
+            if hasattr(self, 'btn_avd_launch') and self.btn_avd_launch:
+                self.btn_avd_launch.configure(text='\u25B6  Launch')
+                self.btn_avd_kill.configure(state='normal')
+                self.avd_combo.configure(state='disabled')
+
+        def on_done():
+            if hasattr(self, 'btn_avd_launch') and self.btn_avd_launch:
+                self.btn_avd_launch.configure(state='normal', text='\u25B6  Launch')
+                self.btn_avd_kill.configure(state='disabled')
+                self.avd_combo.configure(state='readonly')
+
+        self.controller.wipe_avd(name, on_start=on_start, on_done=on_done)
+
     def _kill_avd(self):
         if hasattr(self, 'btn_avd_kill') and self.btn_avd_kill:
             self.btn_avd_kill.configure(state='disabled')
@@ -1280,9 +1492,21 @@ class PetTrackerDevTool(ctk.CTk):
         self.git_msg_entry.delete(0, 'end')
 
         def do_add():
+            self._log('--- Staged changes ---', 'INFO')
+            self.controller.git_diff_cached_stat()
+            self._log('--- Unstaged status ---', 'INFO')
+            self.controller.git_status_short()
             self.controller.git_add_all()
             self.controller.git_commit(msg)
         threading.Thread(target=do_add, daemon=True).start()
+
+    def _show_git_diff(self):
+        self._log('Git: diff...', 'INFO')
+        self.controller.git_diff()
+
+    def _show_git_diff_cached(self):
+        self._log('Git: diff (staged)...', 'INFO')
+        self.controller.git_diff_cached_stat()
 
     def _git_status(self):
         self._log('Git: status...', 'INFO')
@@ -1327,15 +1551,59 @@ class PetTrackerDevTool(ctk.CTk):
             self._log('Settings updated.', 'INFO')
             self._init_avd_list()
 
+    def _refresh_profile_combo(self):
+        if hasattr(self, 'profile_combo'):
+            profiles = self.config.list_profiles() or ['default']
+            self.profile_combo.configure(values=profiles)
+            cur = self.config.current_profile
+            if cur in profiles:
+                self.profile_combo.set(cur)
+
+    def _save_profile(self):
+        name = self.profile_name_var.get().strip() if hasattr(self, 'profile_name_var') else ''
+        if not name:
+            messagebox.showwarning('Profile', 'Enter a profile name.')
+            return
+        self.config.save_profile(name)
+        self._log(f'Profile saved: {name}', 'SUCCESS')
+        self._refresh_profile_combo()
+        self.profile_name_var.set('')
+
+    def _load_profile(self):
+        name = self.profile_combo.get() if hasattr(self, 'profile_combo') else ''
+        if not name or name == 'default' and name not in self.config.profiles:
+            self._log('No profile selected.', 'WARNING')
+            return
+        if not self.config.load_profile(name):
+            self._log(f'Failed to load profile: {name}', 'ERROR')
+            return
+        self._log(f'Profile loaded: {name}', 'SUCCESS')
+        self._reconfigure_after_path_change(self.config.project_root)
+        self._refresh_profile_combo()
+
+    def _delete_profile(self):
+        name = self.profile_combo.get() if hasattr(self, 'profile_combo') else ''
+        if not name:
+            self._log('No profile selected.', 'WARNING')
+            return
+        if name == 'default':
+            self._log('Cannot delete default profile.', 'WARNING')
+            return
+        if messagebox.askyesno('Delete Profile', f'Delete profile "{name}"?'):
+            if self.config.delete_profile(name):
+                self._log(f'Profile deleted: {name}', 'SUCCESS')
+                self._refresh_profile_combo()
+            else:
+                self._log(f'Failed to delete profile: {name}', 'ERROR')
+
     def _reconfigure_after_path_change(self, path):
         self.config.project_root = path
         self.config.auto_detect(project_root_hint=path)
         self.config.save()
         self.controller.config = self.config
         if hasattr(self, 'terminal'):
-            self.terminal.project_root = path
-            self.terminal._prompt_prefix = f'{path}>'
-            self.terminal._write(f'\nSwitched to: {path}\n', 'prompt')
+            self.terminal.set_project_root(path)
+            self.terminal.tabs['General']._write(f'\nSwitched to: {path}\n', 'prompt')
         self._update_path_label()
         self._log(f'Switched to project: {path}', 'INFO')
         self._init_avd_list()
@@ -1363,6 +1631,13 @@ class PetTrackerDevTool(ctk.CTk):
     def _switch_project(self):
         self._browse_project()
 
+    def _edit_env_file(self):
+        env_file = self.env_combo.get() if hasattr(self, 'env_combo') else 'default'
+        filename = '.env'
+        if env_file and env_file != 'default':
+            filename = f'.env.{env_file}'
+        EnvEditorDialog(self, self.config.project_root, filename)
+
     def _on_env_change(self, choice):
         self._log(f'Switching Firebase environment to: {choice}', 'INFO')
         self.controller.switch_firebase_project(choice)
@@ -1388,13 +1663,49 @@ class PetTrackerDevTool(ctk.CTk):
         self._log(f'Importing emulator data from {path}...', 'INFO')
         self.controller.firebase_import_data(path)
 
+    def _refresh_snapshot_list(self):
+        if hasattr(self, 'snapshot_combo'):
+            snaps = self.controller.snapshot_list() or ['(no snapshots)']
+            self.snapshot_combo.configure(values=snaps)
+            if snaps and snaps[0] != '(no snapshots)':
+                self.snapshot_combo.set(snaps[0])
+
+    def _snapshot_save(self):
+        name = self.snapshot_name_var.get().strip() if hasattr(self, 'snapshot_name_var') else ''
+        if not name:
+            messagebox.showwarning('Snapshot', 'Enter a snapshot name.')
+            return
+        self._log(f'Saving snapshot: {name}', 'INFO')
+        self.controller.snapshot_save(name)
+        self.snapshot_name_var.set('')
+        self.after(2000, self._refresh_snapshot_list)
+
+    def _snapshot_load(self):
+        name = self.snapshot_combo.get() if hasattr(self, 'snapshot_combo') else ''
+        if not name or name == '(no snapshots)':
+            self._log('No snapshot selected.', 'WARNING')
+            return
+        self._log(f'Loading snapshot: {name}', 'INFO')
+        self._log('This will stop current emulators and restart with snapshot.', 'WARNING')
+        self.controller.snapshot_load(name)
+
+    def _snapshot_delete(self):
+        name = self.snapshot_combo.get() if hasattr(self, 'snapshot_combo') else ''
+        if not name or name == '(no snapshots)':
+            self._log('No snapshot selected.', 'WARNING')
+            return
+        if messagebox.askyesno('Delete Snapshot', f'Delete snapshot "{name}"?'):
+            self._log(f'Deleting snapshot: {name}', 'INFO')
+            self.controller.snapshot_delete(name)
+            self.after(1000, self._refresh_snapshot_list)
+
     # ── Log Panel ──────────────────────────────────────────
 
     def _build_log_panel(self):
         container = ctk.CTkFrame(self, border_width=1, border_color=C['border'],
                                   fg_color=C['card'])
         container.grid(row=2, column=0, columnspan=2, padx=10, pady=(4, 6), sticky='nsew')
-        container.grid_rowconfigure(1, weight=1)
+        container.grid_rowconfigure(2, weight=1)
         container.grid_columnconfigure(0, weight=1)
 
         header = ctk.CTkFrame(container, fg_color='transparent')
@@ -1409,12 +1720,30 @@ class PetTrackerDevTool(ctk.CTk):
                       font=('Segoe UI', 10),
                       command=self._clear_log).grid(row=0, column=1, padx=(0, 8), pady=(5, 2), sticky='e')
 
+        filter_frame = ctk.CTkFrame(container, fg_color='transparent')
+        filter_frame.grid(row=1, column=0, padx=6, pady=(0, 2), sticky='w')
+        self._log_filter_btns = {}
+        for level, cfg in [
+            ('INFO', '#CCCCCC'), ('SUCCESS', '#4CAF50'), ('WARNING', '#FF9800'),
+            ('ERROR', '#F44336'), ('EMULATOR', '#00BCD4'), ('FLUTTER', '#FFD740'),
+            ('ANDROID', '#81C784'), ('BUILD', '#CE93D8'),
+        ]:
+            btn = ctk.CTkButton(
+                filter_frame, text=level, width=60, height=20,
+                font=('Segoe UI', 9), corner_radius=4,
+                fg_color=cfg, text_color='#111111',
+                hover_color=cfg,
+                command=lambda l=level: self._toggle_log_level(l),
+            )
+            btn.pack(side='left', padx=(0, 3))
+            self._log_filter_btns[level] = btn
+
         self.log_textbox = Text(
             container, bg='#18181c', fg='#c0c0c0',
             insertbackground='#c0c0c0', font=('Consolas', 11),
             relief='flat', borderwidth=0, padx=8, pady=6, wrap='word', state='normal',
         )
-        self.log_textbox.grid(row=1, column=0, sticky='nsew', padx=0, pady=0)
+        self.log_textbox.grid(row=2, column=0, sticky='nsew', padx=0, pady=0)
 
         for tag, color in [
             ('info', '#c0c0c0'), ('success', '#4CAF50'), ('warning', '#FF9800'),
@@ -1450,6 +1779,18 @@ class PetTrackerDevTool(ctk.CTk):
     def _clear_log(self):
         self.log_textbox.delete('1.0', 'end')
 
+    def _toggle_log_level(self, level):
+        visible = self.logger.toggle_level(level)
+        btn = self._log_filter_btns.get(level)
+        if btn:
+            if visible:
+                orig = getattr(btn, '_orig_fg', '#CCCCCC')
+                btn.configure(fg_color=orig, text_color='#111111')
+            else:
+                if not hasattr(btn, '_orig_fg'):
+                    btn._orig_fg = btn._fg_color
+                btn.configure(fg_color=C['gray'], text_color=C['muted'])
+
     # ── Status ─────────────────────────────────────────────
 
     def _build_status_bar(self):
@@ -1459,15 +1800,22 @@ class PetTrackerDevTool(ctk.CTk):
         bar.grid_propagate(False)
 
         top_line = ctk.CTkFrame(bar, height=1, fg_color=C['border'], corner_radius=0)
-        top_line.grid(row=0, column=0, columnspan=4, sticky='ew')
+        top_line.grid(row=0, column=0, columnspan=6, sticky='ew')
 
-        self.abort_btn = ClaudeButton(bar, text='\u2716  Abort', width=75, style='danger',
+        left_frame = ctk.CTkFrame(bar, fg_color='transparent')
+        left_frame.grid(row=0, column=0, padx=(8, 0), pady=3, sticky='w')
+        self.abort_btn = ClaudeButton(left_frame, text='\u2716  Abort', width=75, style='danger',
                                       font=('Segoe UI', 10), height=24)
         self.abort_btn.configure(command=self._abort)
-        self.abort_btn.grid(row=0, column=0, padx=(8, 4), pady=3)
+        self.abort_btn.pack(side='left', padx=(0, 6))
 
-        self.busy_indicator = ctk.CTkLabel(bar, text='', font=('Consolas', 11))
-        self.busy_indicator.grid(row=0, column=1, padx=(0, 4), pady=3, sticky='w')
+        self.busy_indicator = ctk.CTkLabel(left_frame, text='', font=('Consolas', 11))
+        self.busy_indicator.pack(side='left', padx=(0, 6))
+
+        ClaudeButton(left_frame, text='\u21BB', width=28,
+                     style='secondary',
+                     font=('Segoe UI', 10), height=22,
+                     command=self._refresh_sdk_info).pack(side='left')
 
         parts = []
         if self._flutter_version:
@@ -1500,6 +1848,11 @@ class PetTrackerDevTool(ctk.CTk):
         text = '\u25CF' if busy else '\u25CB'
         self.busy_indicator.configure(text=text, text_color=color)
         self.after(500, self._poll_busy)
+
+    def _refresh_sdk_info(self):
+        self._log('Refreshing SDK info...', 'INFO')
+        self._update_flutter_version()
+        self._update_git_branch()
 
     def _refresh_status_bar(self):
         self._build_status_bar()
@@ -1537,7 +1890,35 @@ class PetTrackerDevTool(ctk.CTk):
 
     # ── Shutdown ───────────────────────────────────────────
 
+    def _save_session(self):
+        modal_names = []
+        for m in self._modals:
+            if m.winfo_exists():
+                name = type(m).__name__.replace('Modal', '')
+                modal_names.append(name)
+        self.config.session_open_modals = modal_names
+        self.config.save()
+
+    def _restore_session(self):
+        names = getattr(self.config, 'session_open_modals', [])
+        modal_map = {
+            'Firebase': self._open_firebase,
+            'Flutter': self._open_flutter,
+            'Android': self._open_android,
+            'Git': self._open_git,
+            'Tools': self._open_tools,
+        }
+        for name in names:
+            fn = modal_map.get(name)
+            if fn:
+                fn()
+
     def _on_close(self):
+        self._save_session()
+        self._log('Minimized to tray. Use Tools > Quit to exit fully.', 'INFO')
+        self.iconify()
+
+    def _quit_app(self):
         self._log('Shutting down...', 'INFO')
         self.monitor.stop()
         self.logger.stop()
@@ -1547,7 +1928,7 @@ class PetTrackerDevTool(ctk.CTk):
         self._modals.clear()
         self.controller.kill_all()
         if hasattr(self, 'terminal'):
-            self.terminal._abort_cmd()
+            self.terminal.abort_all()
         self.destroy()
 
 
